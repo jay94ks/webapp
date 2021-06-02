@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 
 namespace WebApp.Extensions
 {
+
     public static class TaskExtension
     {
         /// <summary>

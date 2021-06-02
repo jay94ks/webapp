@@ -1,0 +1,23 @@
+﻿version: '3'
+services:
+  testapp:
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - DB_SERVER=testapp-db
+    container_name: testapp
+
+  mysql:
+    restart: always
+    image: mysql:5.7
+    command: --lower_case_table_names=1
+    container_name: testapp-db
+    environment:
+      - MYSQL_DATABASE=tesst
+      - MYSQL_ALLOW_EMPTY_PASSWORD=yes
+      - TZ=Asia/Seoul
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci

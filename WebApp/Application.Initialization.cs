@@ -158,6 +158,20 @@ namespace WebApp
                 Action(WSL);
                 return this;
             }
+
+            /// <summary>
+            /// Application with Middleware:
+            /// </summary>
+            /// <returns></returns>
+            public Initialization Middleware(Type Type, params object[] Options)
+                => Using(int.MaxValue, X => X.UseMiddleware(Type));
+
+            /// <summary>
+            /// Application with Middleware:
+            /// </summary>
+            /// <returns></returns>
+            public Initialization Middleware<Type>(params object[] Options)
+                => Using(int.MaxValue, X => X.UseMiddleware(typeof(Type), Options));
         }
     }
 }

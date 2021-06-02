@@ -1,14 +1,18 @@
 ﻿using Microsoft.AspNetCore;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Reflection;
 using System.Threading.Tasks;
+using WebApp.Extensions;
+using WebApp.Services;
 
 namespace WebApp
 {
@@ -17,10 +21,12 @@ namespace WebApp
     /// </summary>
     public abstract partial class Application
     {
-        private volatile bool m_KeepRunning = false;
         private ILogger m_Logger = null;
         private IDisposable m_LoggingScope = null;
-        private WebSockets_ m_WebSockets = null;
+        private Service[] m_Services = null;
+
+        private Task m_Startup;
+        private Task m_Shutdown;
 
         /// <summary>
         /// Root Directory to Application Entry-Assembly.
@@ -28,7 +34,7 @@ namespace WebApp
         public static readonly string RootDirectory;
 
         /// <summary>
-        /// 
+        /// Set RootDirectory as EntryAssembly location.
         /// </summary>
         static Application() => RootDirectory
             = Path.GetDirectoryName(Assembly.GetEntryAssembly().Location);
@@ -36,15 +42,12 @@ namespace WebApp
         /// <summary>
         /// Initialize the Application.
         /// </summary>
-        public Application()
-        {
-            m_WebSockets = new WebSockets_();
-        }
+        public Application() => WebSockets = new WebSockets_();
 
         /// <summary>
-        /// 
+        /// WebSocket Manager.
         /// </summary>
-        internal WebSockets_ WebSockets => m_WebSockets;
+        internal WebSockets_ WebSockets { get; }
 
         /// <summary>
         /// Run the application.
@@ -87,55 +90,70 @@ namespace WebApp
         /// <returns></returns>
         private Initialization Configure(Initialization App)
         {
+            var Assemblies = new List<Assembly>();
+
+            Assemblies.Add(typeof(Application).Assembly);
+            Assemblies.Add(Assembly.GetEntryAssembly());
+
+            /* Get Application-Part Assemblies. */
+            OnAppPart(X =>
+            {
+                if (Assemblies.Contains(X))
+                    return;
+
+                Assemblies.Add(X);
+            });
+
             return App
 
             /* Register the Instance of Runtime class as Singleton. */
             .With(int.MinValue, Services =>
             {
-                var Entry = Assembly.GetEntryAssembly();
-                IMvcBuilder Mvc;
+                Action<IMvcBuilder> AddAppParts = X => {
+                    Assemblies.ForEach(Y => X.AddApplicationPart(Y));
+                };
 
+                /* Inject dependencies to application. */
+                Services.AddSingleton(this);
                 Services.AddSingleton<IHostedService>(Provider
                     => new Runtime(this, Provider.GetService<ILogger<Runtime>>()));
 
                 Services.AddLogging(X => X.AddConsole());
 
-                Mvc = Services.AddMvc()
-                    .AddApplicationPart(Entry);
+                /* Add Application-Parts to Each MVC Builders. */
+                AddAppParts(Services.AddMvc());
+                AddAppParts(Services.AddRazorPages());
+                AddAppParts(Services.AddControllers());
 
-                Mvc = Services.AddRazorPages()
-                    .AddApplicationPart(Entry);
-
-                Mvc = Services.AddControllers()
-                    .AddApplicationPart(Entry);
+                Assemblies.ForEach(Assembly => ScanServices(Assembly));
             })
 
             /* Register WebSocket Handling routines. */
             .Using(int.MaxValue, Builder =>
             {
+                var Middlewares = new List<(int Priority, Type Type)>();
+                var Routewares  = new List<(int Priority, Type Type, string Route)>();
+
+                Assemblies.ForEach(Assembly =>
+                {
+                    Assembly
+                        .GetTypes(Y => Y.IsSubclassOf(typeof(Middleware)) && !Y.IsAbstract)
+                        .Each(Y =>
+                        {
+                            var Attribute = Y.GetCustomAttribute<MiddlewareAttribute>();
+                            if (Attribute != null)
+                                Middlewares.Add((Attribute.Priority, Y));
+                        });
+                });
+
                 Builder.UseWebSockets(new WebSocketOptions()
                 {
                     KeepAliveInterval = TimeSpan.FromMilliseconds(60 * 1000),
                     ReceiveBufferSize = 2048
                 });
 
-                Builder.Use(async (Http, Next) =>
-                {
-                    if (Http.WebSockets.IsWebSocketRequest)
-                    {
-                        if (m_WebSockets.Check(Http.Request))
-                        {
-                            await m_WebSockets.Handle(Http);
-                            return;
-                        }
-
-                        /* It isn't a path for WebSockets. */
-                        Http.Response.StatusCode = (int)HttpStatusCode.BadRequest;
-                        return;
-                    }
-
-                    await Next();
-                });
+                Middlewares.Sort((A, B) => A.Priority - B.Priority);
+                Middlewares.ForEach(X => Builder.UseMiddleware(X.Type));
 
                 Builder.UseRouting();
                 Builder.UseEndpoints(X =>
@@ -147,56 +165,141 @@ namespace WebApp
         }
 
         /// <summary>
+        /// Scan Services and Instantiates them.
+        /// </summary>
+        /// <param name="obj"></param>
+        private void ScanServices(Assembly Target)
+        {
+            m_Services = m_Services.Merge(Target
+                .GetTypes(X => X.IsSubclassOf(typeof(Service)))
+                .Map(X => X.Instantiate<Service>()));
+        }
+
+        /// <summary>
+        /// Called when the application started.
+        /// </summary>
+        private Task OnStartup(ILogger Logger)
+        {
+            lock(this)
+            {
+                if (m_Startup is null)
+                {
+                    m_LoggingScope = (m_Logger = Logger).BeginScope(this);
+                    m_Startup = Startup();
+                }
+
+                return m_Startup;
+            }
+        }
+
+        /// <summary>
+        /// Called when the application stopped.
+        /// </summary>
+        private Task OnShutdown()
+        {
+            lock(this)
+            {
+                if (m_Startup is null)
+                    return Task.CompletedTask;
+
+                if (m_Shutdown is null)
+                {
+                    (m_Shutdown = Shutdown())
+                        .Then(X =>
+                        {
+                            /**
+                             * Dispose the logging scope
+                             * after completion of shutdown method.
+                             */
+                            m_LoggingScope.Dispose();
+                            m_LoggingScope = null;
+
+                            return Task.CompletedTask;
+                        });
+                }
+
+                return m_Shutdown;
+            }
+        }
+
+        /// <summary>
         /// Register the Application Part.
         /// </summary>
         /// <param name="AddAppPart"></param>
         protected virtual void OnAppPart(Action<Assembly> Register) { }
 
         /// <summary>
-        /// Called when the application started.
+        /// Get Service object by predicate.
         /// </summary>
-        private void OnStartup(ILogger Logger)
+        /// <param name="Predicate">Null isn't allowed.</param>
+        /// <returns></returns>
+        public Service GetService(Predicate<Service> Predicate)
         {
-            lock(this)
-            {
-                if (m_KeepRunning)
-                    return;
+            if (Predicate is null)
+                throw new ArgumentNullException(nameof(Predicate));
 
-                m_Logger = Logger;
-                m_KeepRunning = true;
+            foreach (var Each in m_Services)
+            {
+                if (Predicate(Each))
+                    return EnsureService(Each);
             }
 
-            m_LoggingScope = m_Logger.BeginScope(this);
-            Startup();
+            return null;
         }
+
+        /// <summary>
+        /// Get Service object by predicate.
+        /// </summary>
+        /// <typeparam name="ServiceType"></typeparam>
+        /// <param name="Predicate">If null given, returns first found service.</param>
+        /// <returns></returns>
+        public ServiceType GetService<ServiceType>(Predicate<ServiceType> Predicate = null)
+            where ServiceType : Service
+        {
+            if (Predicate is null)
+                Predicate = X => true;
+
+            foreach (var Each in m_Services)
+            {
+                if ((Each is ServiceType CastedService) && Predicate(CastedService))
+                    return EnsureService(CastedService);
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Initialize the Service.
+        /// </summary>
+        /// <typeparam name="ServiceType"></typeparam>
+        /// <param name="Service"></param>
+        /// <returns></returns>
+        private ServiceType EnsureService<ServiceType>(ServiceType Service)
+            where ServiceType : Service
+        {
+            var Task = Service._Startup();
+
+            /**
+             * If the startup method of service not completed, 
+             * Wait and ensure its completion.
+             */
+            if (!Task.IsCompleted)
+                 Task.Wait();
+
+            return Service;
+        }
+
+        /// <summary>
+        /// Called when the application started.
+        /// </summary>
+        protected virtual Task Startup() 
+            => Task.CompletedTask;
 
         /// <summary>
         /// Called when the application stopped.
         /// </summary>
-        private void OnShutdown()
-        {
-            lock(this)
-            {
-                if (!m_KeepRunning)
-                    return;
-
-                m_KeepRunning = false;
-            }
-
-            Shutdown();
-            m_LoggingScope.Dispose();
-            m_LoggingScope = null;
-        }
-
-        /// <summary>
-        /// Called when the application started.
-        /// </summary>
-        protected virtual void Startup() { }
-
-        /// <summary>
-        /// Called when the application stopped.
-        /// </summary>
-        protected virtual void Shutdown() { }
+        protected virtual Task Shutdown() 
+            => m_Services.Map(X => X._Shutdown()).All();
 
     }
 }

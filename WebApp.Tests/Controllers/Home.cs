@@ -12,9 +12,8 @@ namespace WebApp.Tests.Controllers
     {
 
 
-        public Home()
+        public Home(Application App)
         {
-
 
         }
 

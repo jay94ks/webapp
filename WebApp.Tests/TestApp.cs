@@ -23,6 +23,7 @@ namespace WebApp.Tests
         static async Task Main(string[] args)
             => await (new TestApp()).Run(args);
 
+
         /// <summary>
         /// Prepare WebHost for the Application.
         /// </summary>
@@ -40,10 +41,24 @@ namespace WebApp.Tests
                 });
             });
 
+            Host.Using(X =>
+            {
+                
+            });
+
             App.UseWebRoot("wwwroot");
             App.UseContentRoot("wwwroot");
 
             return App.UseUrls("http://*:80");
+        }
+
+        /// <summary>
+        /// Execute Database Migration.
+        /// </summary>
+        /// <returns></returns>
+        protected override async Task Startup()
+        {
+            await base.Startup();
         }
     }
 }

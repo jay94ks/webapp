@@ -34,7 +34,7 @@ namespace WebApp
             /// <param name="cancellationToken"></param>
             /// <returns></returns>
             public Task StartAsync(CancellationToken cancellationToken) 
-                => Task.Run(() => Application.OnStartup(Logger));
+                => Application.OnStartup(Logger);
 
             /// <summary>
             /// Receive `Stop` message.
@@ -42,7 +42,7 @@ namespace WebApp
             /// <param name="cancellationToken"></param>
             /// <returns></returns>
             public Task StopAsync(CancellationToken cancellationToken)
-                => Task.Run(() => Application.OnShutdown());
+                => Application.OnShutdown();
         }
     }
 }
